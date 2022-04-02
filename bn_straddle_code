@@ -1,0 +1,227 @@
+import logging
+from datetime import datetime
+from datetime import date
+import statistics
+from time import time
+from time import sleep
+from alice_blue import *
+from datetime import timedelta
+
+
+#coniguration
+username = ''
+password = ''
+api_secret =''
+twoFA =''
+app_id = ''
+#ogging.basicConfig(level=logging.DEBUG) #optional for getting debug messages
+
+#config
+ltp = 0
+socket_opened = False
+alice = None
+NIFTY_BANK_IDX =''
+no_of_lots = 1
+sl_percentage = 0.3
+banknifty_script = None
+global datecalc
+#banknifty_script = alice.get_instrument_by_symbol('NFO',NIFTY_BANK_IDX)
+
+def event_handler_quote_update(message):
+    global ltp
+    ltp = message['ltp']
+    print('LTP OF SELECTED SCRIP:',ltp)
+    
+def open_callback():
+    global socket_opened 
+    socket_opened = True
+    
+def open_socket_now():
+    global socket_opened
+    
+    socket_opened = False
+    alice.start_websocket(subscribe_callback=event_handler_quote_update,
+                      socket_open_callback=open_callback,
+                      run_in_background=True)
+    sleep(10)
+    while(socket_opened==False): # wait till socket open and then subscribe
+        pass
+
+#MAIN LOGIC FROM HERE **************************************
+
+def main():
+    global alice,socket_opened,username,password,twoFA,ltp,api_secret,bn_call,bn_put,order_placed,ce_price,pe_price,datecalc
+    
+    while alice is None:
+        print('logging in alice')
+        try:
+            access_token = AliceBlue.login_and_get_access_token(username=username, password=password,twoFA=twoFA, api_secret=api_secret,app_id = '')
+            alice = AliceBlue(username=username, password=password, access_token=access_token, master_contracts_to_download=['NFO'])
+        except:
+            print('login failed Alice..retrying in 3 mins')
+            sleep(100)
+            pass
+            
+    if socket_opened == False:
+        open_socket_now()
+    get_bnf_month()
+    
+    alice.subscribe(banknifty_script, LiveFeedType.MARKET_DATA)
+    sleep(10)
+    
+    
+    order_placed = False
+    
+    #while datetime.now().time() <= time(13,00):
+     #    sleep(60)
+    try:
+        while order_placed == False:
+            
+                    curr_ltp = ltp
+                    atm_ce,atm_pe = int(curr_ltp/100)*100,int(curr_ltp/100)*100
+                    print('atm_ ce',atm_ce,'atm_pe',atm_pe)
+                    alice.unsubscribe(banknifty_script,LiveFeedType.MARKET_DATA)
+                    get_date_curr_expiry(atm_ce)
+                    get_ce_curr_price(atm_ce)
+                    get_pe_curr_price(atm_pe)
+                    order_placed = True
+            #if order_placed == False:
+                #print("order failed")
+                #exit(0)
+
+    except Exception as e:
+        print(f"some error occured at initial main::->{e}")
+
+def get_bnf_month():
+    global NIFTY_BANK_IDX,banknifty_script
+
+    MON = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC']                    
+    curr_mon = datetime.now().month 
+    banknifty_script = None
+    while banknifty_script == None:
+        mon = MON[curr_mon-1]
+        NIFTY_BANK_IDX = f"BANKNIFTY {mon} FUT"
+        
+        banknifty_script = alice.get_instrument_by_symbol('NFO',NIFTY_BANK_IDX)
+        
+        curr_mon = curr_mon + 1
+        token_bnf = banknifty_script[1]
+    print('final bnf',{banknifty_script})
+        
+
+        
+def get_ce_curr_price(atm_ce):
+    print('get_ce_curr_price')
+    global bn_call,token_ce,ce_order_placed,ce_sl_price
+    
+    print(atm_ce)
+    bn_call = alice.get_instrument_for_fno(symbol = 'BANKNIFTY', expiry_date=datecalc, is_fut = False, strike = atm_ce, is_CE = True)
+    alice.subscribe(bn_call, LiveFeedType.COMPACT)
+    sleep(1)
+    print("ok fine here")
+    ce_price = ltp
+    print(ce_price)
+    sell_ce_option(bn_call,ce_price)
+    
+    print(f"sell ce order placed at price:{ltp}")
+    alice.unsubscribe(bn_call,LiveFeedType.COMPACT)
+
+def get_pe_curr_price(atm_pe):
+    print('get_pe_curr_price')
+    global bn_put,token_pe,pe_order_placed,pe_sl_price
+    
+    #print(atm_pe)
+    bn_put = alice.get_instrument_for_fno(symbol = 'BANKNIFTY',expiry_date =datecalc, is_fut = False, strike = atm_pe, is_CE = False)
+    alice.subscribe(bn_put, LiveFeedType.COMPACT)
+    sleep(1)
+    print("ok til here")
+    pe_price = ltp
+    sell_pe_option(bn_put,pe_price)
+    
+    print(f"sell pe order placed at price:{ltp}")
+    alice.unsubscribe(bn_put,LiveFeedType.COMPACT)
+                        
+
+    
+def get_date_curr_expiry(atm_ce):
+    print('date_curr_expiry')
+    global datecalc
+    print('atm_ce',atm_ce)
+    call = None
+    datecalc = date.today()
+    print(datecalc)
+    print("get current week expiry date")
+    while call == None:
+        try:
+            call = alice.get_instrument_for_fno(symbol = 'BANKNIFTY',expiry_date =datecalc, is_fut = False, strike = atm_ce, is_CE = True)
+            if call == None:
+                print('no values in call')
+                datecalc = datecalc + timedelta(days=1)
+       
+        
+        except:
+           pass
+    
+def sell_ce_option(bn_call,ce_price):
+    quantity = no_of_lots*int(bn_call[5])
+    
+    sell_order = alice.place_order(transaction_type = TransactionType.Sell,
+                             instrument = bn_call,
+                             quantity = quantity,
+                             order_type = OrderType.Market,
+                             product_type = ProductType.Intraday,
+                             price = 0.0,
+                             trigger_price = None,
+                             stop_loss = None,
+                             square_off = None,
+                             trailing_sl = None,
+                             is_amo = False)
+    sleep(1)
+    if sell_order['status']=='success':
+        sl_order = alice.place_order(transaction_type = TransactionType.Buy,
+                                 instrument = bn_call,
+                                 quantity = quantity,
+                                 order_type = OrderType.StopLossLimit,
+                                 product_type = ProductType.Intraday,
+                                 price = 0.0,
+                                 trigger_price = 1.3*ce_price,
+                                 stop_loss = None,
+                                 square_off = None,
+                                 trailing_sl = None,
+                                 is_amo = False)
+    
+def sell_pe_option(bn_put,pe_price):
+    quantity = no_of_lots*int(bn_call[5])
+    
+    sell_order = alice.place_order(transaction_type = TransactionType.Sell,
+                             instrument = bn_put,
+                             quantity = quantity,
+                             order_type = OrderType.Market,
+                             product_type = ProductType.Intraday,
+                             price = 0.0,
+                             trigger_price = None,
+                             stop_loss = None,
+                             square_off = None,
+                             trailing_sl = None,
+                             is_amo = False)
+    sleep(1)
+    if sell_order['status']=='success':
+        sl_order = alice.place_order(transaction_type = TransactionType.Buy,
+                                 instrument = bn_put,
+                                 quantity = quantity,
+                                 order_type = OrderType.StopLossLimit,
+                                 product_type = ProductType.Intraday,
+                                 price = 0.0,
+                                 trigger_price = 1.3*pe_price,
+                                 stop_loss = None,
+                                 square_off = None,
+                                 trailing_sl = None,
+                                 is_amo = False)        
+            
+                             
+            
+
+        
+if(__name__=='__main__'):
+    print('straddle strated')
+    main()
